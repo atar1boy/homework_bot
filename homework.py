@@ -1,11 +1,13 @@
 import time
 import os
+import sys
 import telegram
 import requests
 import logging
 from dotenv import load_dotenv
 from http import HTTPStatus
-from functools import wraps
+import custom_exceptions
+
 
 load_dotenv()
 
@@ -25,84 +27,45 @@ HOMEWORK_VERDICTS = {
 }
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-
-log_format = '%(asctime)s [%(levelname)s] %(message)s'
-log_formatter = logging.Formatter(log_format, style='%')
-
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(log_formatter)
-
-logger.addHandler(stream_handler)
-
-
-def cache_status(func):
-    """Декоратор кэширующий статус домашней работы."""
-    cache = {'date_updated': None}
-
-    @wraps(func)
-    def wrapper(args):
-
-        if cache['date_updated'] != args.get('date_updated'):
-            date_updated = args.get('date_updated')
-            cache['date_updated'] = date_updated
-            return func(args)
-        logger.debug('Статус домашней работы не изменился')
-
-    return wrapper
-
-
-def cache_error_messages(func):
-    """Декоратор кэширующий сообщения об ошибке."""
-    сache = {'message': None}
-
-    @wraps(func)
-    def wrapper(bot, message):
-        if message != сache['message']:
-            сache['message'] = message
-            return func(bot, message)
-        if сache['message'] is not None:
-            logger.error(message)
-
-    return wrapper
-
-
 def check_tokens():
     """Проверка доступности переменных окружения."""
     if (TELEGRAM_CHAT_ID and TELEGRAM_TOKEN and TELEGRAM_CHAT_ID) is None:
-        logger.critical('Отсутствуют переменные окружения')
-        raise ValueError
+        logging.critical('Отсутсвуют переменные окружения.')
+        raise custom_exceptions.CheckTokenError
 
     response = requests.get(
         f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe'
     )
     if response.status_code != HTTPStatus.OK:
-        logger.critical('Недоступна переменная окружения: TELEGRAM_TOKEN')
-        raise ValueError
+        logging.critical('Недоступна переменная окружения: TELEGRAM_TOKEN.')
+        raise custom_exceptions.CheckTokenError
 
     response = requests.get(
         f'https://api.telegram.org/bot{TELEGRAM_TOKEN}'
         f'/getChat?chat_id={TELEGRAM_CHAT_ID}'
     )
     if response.status_code != HTTPStatus.OK:
-        logger.critical('Недоступна переменная окружения: TELEGRAM_CHAT_ID')
-        raise ValueError
+        logging.critical('Недоступна переменная окружения: TELEGRAM_CHAT_ID.')
+        raise custom_exceptions.CheckTokenError
 
     response = requests.get(ENDPOINT, headers=HEADERS, params={'from_date': 0})
     if response.status_code != HTTPStatus.OK:
-        logger.critical('Недоступна переменная окружения: ENDPOINT')
-        raise ValueError
+        logging.critical('Недоступна переменная окружения: PRACTICUM_TOKEN.')
+        raise custom_exceptions.CheckTokenError
 
 
-@cache_error_messages
 def send_message(bot, message):
     """Отправка сообщения в телеграм чат."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
-        logger.debug(f'Сообщение успешно отправлено: {message}')
+
     except Exception as error:
-        logger.error(f'Неудалось отправить сообщение: {error}')
+        logging.error('Ошибка отправки сообщения')
+        raise custom_exceptions.SendMessageError(
+            f'Ошибка отправки сообщения: {error}')
+
+    else:
+        logging.debug(f'Сообщение отправлено: {message}')
 
 
 def get_api_answer(timestamp):
@@ -112,63 +75,91 @@ def get_api_answer(timestamp):
             ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
         )
         if response.status_code != HTTPStatus.OK:
-            logger.critical(f'Ошибка API запроса: {response.status_code}')
-            raise ValueError
+            raise custom_exceptions.ApiAnswerError
+
     except requests.RequestException:
-        raise ValueError
+        raise custom_exceptions.ApiAnswerError
+
     return response.json()
 
 
 def check_response(response):
     """Проверка данных полученных из API."""
     if not isinstance(response, dict):
-        logger.error(f'Получен неожиданный тип данных: {type(response)}')
         raise TypeError
+
     if 'homeworks' and 'current_date' not in response:
-        logger.error(f'Получены неожиданные ключи словаря: {response.keys()}')
         raise KeyError
+
     homeworks = response.get('homeworks')
+
     if not isinstance(homeworks, list):
-        logger.error(f'Получен неожиданный тип данных: {type(response)}')
         raise TypeError
+
+    if not homeworks:
+        raise custom_exceptions.NoUpdatesError
+
     return homeworks[0]
 
 
-@cache_status
 def parse_status(homework):
     """Обработка полученных данных."""
-    print(homework.keys())
-    if 'homework_name' and 'status' not in homework.keys():
-        logger.error(f'Получены неожиданные ключи словаря: {homework.keys()}')
+    if 'homework_name' not in homework.keys():
         raise KeyError
+
+    if 'status' not in homework.keys():
+        raise KeyError
+
     homework_name = homework.get('homework_name')
     status = homework.get('status')
+
     if status not in HOMEWORK_VERDICTS.keys():
-        logger.error(f'Неожиданный статус работы: {status}')
         raise KeyError
+
     verdict = HOMEWORK_VERDICTS[status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """Основная логика работы бота."""
+    check_tokens()
+    bot = telegram.Bot(token=TELEGRAM_TOKEN)
+    timestamp = int(time.time())
+    message_cache = 'None'
+    homework_cache = 'None'
+
     while True:
-        timestamp = 0
-        check_tokens()
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
         try:
             response = get_api_answer(timestamp)
             homework = check_response(response)
+            if homework == homework_cache:
+                raise custom_exceptions.NoUpdatesError
+            homework_cache = homework
             message = parse_status(homework)
             send_message(bot, message)
+            timestamp = response.get('current_date', timestamp)
+
+        except custom_exceptions.NoUpdatesError:
+            logging.debug('Отсутствуют изменения статуса работы')
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logger.error(message)
-            send_message(bot, message)
+            if message != message_cache:
+                message_cache = message
+                logging.error(message)
+                send_message(bot, message)
+
+            else:
+                logging.error(message)
 
         time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        level=logging.INFO,
+        format=('%(asctime)s [%(levelname)s] %(name)s,'
+                ' line %(lineno)d, %(message)s'),
+        handlers=[logging.StreamHandler(stream=sys.stdout)]
+    )
     main()
