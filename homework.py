@@ -4,6 +4,7 @@ import sys
 import telegram
 import requests
 import logging
+import json
 from dotenv import load_dotenv
 from http import HTTPStatus
 import custom_exceptions
@@ -16,7 +17,7 @@ PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('CHAT_ID')
 
-RETRY_PERIOD = 600
+RETRY_PERIOD = 600  # seconds
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -29,7 +30,7 @@ HOMEWORK_VERDICTS = {
 
 def check_tokens():
     """Проверка доступности переменных окружения."""
-    if (TELEGRAM_CHAT_ID and TELEGRAM_TOKEN and TELEGRAM_CHAT_ID) is None:
+    if not all([TELEGRAM_CHAT_ID, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
         logging.critical('Отсутсвуют переменные окружения.')
         raise custom_exceptions.CheckTokenError
 
@@ -80,7 +81,10 @@ def get_api_answer(timestamp):
     except requests.RequestException:
         raise custom_exceptions.ApiAnswerError
 
-    return response.json()
+    try:
+        return response.json()
+    except json.decoder.JSONDecodeError:
+        raise custom_exceptions.ApiAnswerError
 
 
 def check_response(response):
@@ -152,7 +156,8 @@ def main():
             else:
                 logging.error(message)
 
-        time.sleep(RETRY_PERIOD)
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
